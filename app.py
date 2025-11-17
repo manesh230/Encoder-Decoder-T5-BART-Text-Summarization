@@ -1,6 +1,7 @@
 import streamlit as st
 import torch
-from transformers import pipeline
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, pipeline
+from peft import PeftModel, PeftConfig
 import time
 
 # Set page config
@@ -26,10 +27,9 @@ st.markdown("""
         border-left: 5px solid #1f77b4;
         margin: 10px 0;
     }
-    .model-status {
-        padding: 10px;
-        border-radius: 5px;
-        margin: 10px 0;
+    .loading-spinner {
+        text-align: center;
+        padding: 20px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -37,89 +37,74 @@ st.markdown("""
 # Header
 st.markdown('<h1 class="main-header">📝 T5-small LoRA Text Summarization</h1>', unsafe_allow_html=True)
 
-@st.cache_resource(show_spinner="Loading summarization model...")
-def load_summarizer():
-    """Load the T5-small LoRA summarization model from Hugging Face"""
+@st.cache_resource(show_spinner="Loading T5 base model and LoRA adapter...")
+def load_peft_model():
+    """Load the base T5 model and apply LoRA adapter"""
     try:
-        # Load the model directly from Hugging Face
+        # Load the base T5-small model
+        base_model_name = "t5-small"
+        
+        st.write("🔄 Loading base T5-small model...")
+        base_model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
+        tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+        
+        st.write("🔄 Loading LoRA adapter...")
+        # Load the LoRA adapter
+        peft_model = PeftModel.from_pretrained(base_model, "manesh1/t5-small-lora-summarization")
+        
+        # Create pipeline with the combined model
         summarizer = pipeline(
             "summarization",
-            model="manesh1/t5-small-lora-summarization",
-            device=0 if torch.cuda.is_available() else -1  # Use GPU if available
+            model=peft_model,
+            tokenizer=tokenizer,
+            device=0 if torch.cuda.is_available() else -1
         )
+        
         return summarizer
+        
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
         return None
 
-def chunk_text(text, max_chunk_size=512):
-    """Split long text into chunks for processing"""
-    sentences = text.split('. ')
-    chunks = []
-    current_chunk = ""
-    
-    for sentence in sentences:
-        if len(current_chunk) + len(sentence) < max_chunk_size:
-            current_chunk += sentence + '. '
-        else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence + '. '
-    
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    
-    return chunks
-
-def summarize_long_text(summarizer, text, max_length=150, min_length=30):
-    """Summarize long text by chunking"""
-    if len(text.split()) <= 400:
-        # Direct summarization for shorter texts
-        result = summarizer(
-            text,
-            max_length=max_length,
-            min_length=min_length,
-            do_sample=False
+@st.cache_resource(show_spinner="Loading model with alternative method...")
+def load_model_alternative():
+    """Alternative loading method"""
+    try:
+        # Try direct pipeline loading with trust_remote_code
+        summarizer = pipeline(
+            "summarization",
+            model="manesh1/t5-small-lora-summarization",
+            trust_remote_code=True,
+            device=0 if torch.cuda.is_available() else -1
         )
-        return result[0]['summary_text']
-    else:
-        # Chunk and summarize for longer texts
-        chunks = chunk_text(text)
-        summaries = []
-        
-        progress_bar = st.progress(0)
-        for i, chunk in enumerate(chunks):
-            result = summarizer(
-                chunk,
-                max_length=max_length // len(chunks),
-                min_length=min_length // len(chunks),
-                do_sample=False
-            )
-            summaries.append(result[0]['summary_text'])
-            progress_bar.progress((i + 1) / len(chunks))
-        
-        # Combine summaries
-        combined_summary = " ".join(summaries)
-        
-        # If combined summary is still long, summarize it again
-        if len(combined_summary.split()) > 100:
-            final_result = summarizer(
-                combined_summary,
-                max_length=max_length,
-                min_length=min_length,
-                do_sample=False
-            )
-            return final_result[0]['summary_text']
-        
-        return combined_summary
+        return summarizer
+    except Exception as e:
+        st.error(f"Alternative loading failed: {str(e)}")
+        return None
 
 def main():
     # Load model
-    with st.spinner("🔄 Loading the T5-small LoRA model from Hugging Face..."):
-        summarizer = load_summarizer()
+    with st.spinner("🔄 Initializing model... This may take a minute."):
+        summarizer = load_peft_model()
+        
+        # If first method fails, try alternative
+        if summarizer is None:
+            st.info("Trying alternative loading method...")
+            summarizer = load_model_alternative()
     
     if summarizer is None:
-        st.error("❌ Failed to load the model. Please check your internet connection and try again.")
+        st.error("""
+        ❌ Failed to load the model. This is likely because:
+        
+        - The model is a LoRA adapter and requires special loading
+        - PEFT library might not be properly installed
+        - Network connectivity issues
+        
+        **Try these solutions:**
+        1. Make sure `peft` is in your requirements.txt
+        2. Check your internet connection
+        3. Try running locally first
+        """)
         return
     
     # Display model status
@@ -133,26 +118,25 @@ def main():
         "Maximum summary length",
         min_value=50,
         max_value=300,
-        value=150,
-        help="Maximum number of words in the summary"
+        value=150
     )
     
     min_length = st.sidebar.slider(
         "Minimum summary length", 
         min_value=10,
         max_value=100,
-        value=30,
-        help="Minimum number of words in the summary"
+        value=30
     )
     
     # Model info
     st.sidebar.markdown("---")
     st.sidebar.title("ℹ️ Model Information")
     st.sidebar.info("""
-    **Model:** T5-small with LoRA adapters  
+    **Architecture:** T5-small + LoRA adapter  
+    **Base Model:** t5-small  
+    **Adapter:** manesh1/t5-small-lora-summarization  
     **Task:** Text summarization  
-    **Source:** Hugging Face Hub  
-    **Repository:** [manesh1/t5-small-lora-summarization](https://huggingface.co/manesh1/t5-small-lora-summarization)
+    **Framework:** PEFT (Parameter-Efficient Fine-Tuning)
     """)
     
     # Main content area
@@ -160,43 +144,38 @@ def main():
     
     with col1:
         st.subheader("📄 Input Text")
-        input_method = st.radio(
-            "Choose input method:",
-            ["Type text", "Paste text", "Sample text"],
-            horizontal=True
+        
+        # Sample texts
+        sample_option = st.selectbox(
+            "Choose sample text or enter your own:",
+            ["Enter your own text", "AI Technology", "Machine Learning", "Climate Change"]
         )
         
-        input_text = ""
+        if sample_option == "AI Technology":
+            input_text = """Artificial intelligence (AI) is intelligence demonstrated by machines, as opposed to natural intelligence displayed by animals including humans. Leading AI textbooks define the field as the study of intelligent agents: any system that perceives its environment and takes actions that maximize its chance of achieving its goals. Some popular accounts use the term artificial intelligence to describe machines that mimic cognitive functions that humans associate with the human mind, such as learning and problem solving.
+
+AI applications include advanced web search engines, recommendation systems, understanding human speech, self-driving cars, automated decision-making, and competing at the highest level in strategic game systems. As machines become increasingly capable, tasks considered to require intelligence are often removed from the definition of AI, a phenomenon known as the AI effect."""
         
-        if input_method == "Type text":
-            input_text = st.text_area(
-                "Enter your text:",
-                height=300,
-                placeholder="Type the text you want to summarize here...",
-                key="input_type"
-            )
-        elif input_method == "Paste text":
-            input_text = st.text_area(
-                "Paste your text:",
-                height=300,
-                placeholder="Paste your text here...",
-                key="input_paste"
-            )
+        elif sample_option == "Machine Learning":
+            input_text = """Machine learning is a subset of artificial intelligence that focuses on algorithms that can learn from data and make predictions or decisions without being explicitly programmed for every task. Deep learning, a further subset of machine learning, uses neural networks with multiple layers to process and extract features from large amounts of data.
+
+These technologies have revolutionized fields like computer vision, natural language processing, and speech recognition. Companies use machine learning for recommendation systems, fraud detection, and automated customer service. The availability of large datasets and powerful computing resources has accelerated advancements in this field."""
+        
+        elif sample_option == "Climate Change":
+            input_text = """Climate change refers to long-term shifts in temperatures and weather patterns. These shifts may be natural, but since the 1800s, human activities have been the main driver of climate change, primarily due to the burning of fossil fuels like coal, oil and gas, which produces heat-trapping gases.
+
+The consequences of climate change now include, among others, intense droughts, water scarcity, severe fires, rising sea levels, flooding, melting polar ice, catastrophic storms and declining biodiversity. People are experiencing climate change in diverse ways. It affects our health, ability to grow food, housing, safety and work."""
+        
         else:
-            # Sample text
-            sample_text = """
-            Artificial intelligence (AI) is intelligence demonstrated by machines, as opposed to natural intelligence displayed by animals including humans. Leading AI textbooks define the field as the study of intelligent agents: any system that perceives its environment and takes actions that maximize its chance of achieving its goals. Some popular accounts use the term artificial intelligence to describe machines that mimic cognitive functions that humans associate with the human mind, such as learning and problem solving.
-
-            AI applications include advanced web search engines, recommendation systems, understanding human speech, self-driving cars, automated decision-making, and competing at the highest level in strategic game systems. As machines become increasingly capable, tasks considered to require intelligence are often removed from the definition of AI, a phenomenon known as the AI effect. For instance, optical character recognition is frequently excluded from things considered to be AI, having become a routine technology.
-
-            Artificial intelligence was founded as an academic discipline in 1956, and in the years since has experienced several waves of optimism, followed by disappointment and the loss of funding, followed by new approaches, success, and renewed funding. AI research has tried and discarded many different approaches during its lifetime, including simulating the brain, modeling human problem solving, formal logic, large databases of knowledge, and imitating animal behavior. In the first decades of the 21st century, highly mathematical and statistical machine learning has dominated the field, and this technique has proved highly successful, helping to solve many challenging problems throughout industry and academia.
-            """
-            input_text = st.text_area(
-                "Sample text (you can modify this):",
-                value=sample_text,
-                height=300,
-                key="input_sample"
-            )
+            input_text = ""
+        
+        input_text = st.text_area(
+            "Your text:",
+            value=input_text,
+            height=300,
+            placeholder="Type or paste your text here...",
+            key="input_text"
+        )
     
     with col2:
         st.subheader("📋 Summary")
@@ -209,22 +188,15 @@ def main():
                     try:
                         start_time = time.time()
                         
-                        if len(input_text.split()) > 400:
-                            summary = summarize_long_text(
-                                summarizer, 
-                                input_text, 
-                                max_length=max_length, 
-                                min_length=min_length
-                            )
-                        else:
-                            result = summarizer(
-                                input_text,
-                                max_length=max_length,
-                                min_length=min_length,
-                                do_sample=False
-                            )
-                            summary = result[0]['summary_text']
+                        # Generate summary
+                        result = summarizer(
+                            input_text,
+                            max_length=max_length,
+                            min_length=min_length,
+                            do_sample=False
+                        )
                         
+                        summary = result[0]['summary_text']
                         end_time = time.time()
                         processing_time = end_time - start_time
                         
@@ -235,9 +207,9 @@ def main():
                         # Statistics
                         col1_stat, col2_stat, col3_stat = st.columns(3)
                         with col1_stat:
-                            st.metric("Original Length", f"{len(input_text.split())} words")
+                            st.metric("Original Words", len(input_text.split()))
                         with col2_stat:
-                            st.metric("Summary Length", f"{len(summary.split())} words")
+                            st.metric("Summary Words", len(summary.split()))
                         with col3_stat:
                             reduction = ((len(input_text.split()) - len(summary.split())) / len(input_text.split())) * 100
                             st.metric("Reduction", f"{reduction:.1f}%")
@@ -253,30 +225,28 @@ def main():
         else:
             st.info("💡 Enter text on the left and click 'Generate Summary' to see the result here.")
     
-    # Additional information
-    st.markdown("---")
-    st.subheader("ℹ️ About this Model")
-    
-    col_info1, col_info2 = st.columns(2)
-    
-    with col_info1:
+    # Technical details
+    with st.expander("🔧 Technical Details"):
         st.markdown("""
-        **Model Features:**
-        - Based on T5-small architecture
-        - Fine-tuned with LoRA (Low-Rank Adaptation)
-        - Optimized for text summarization
-        - Efficient parameter usage
-        - Handles long documents
-        """)
-    
-    with col_info2:
-        st.markdown("""
-        **Usage Tips:**
-        - For best results, use well-structured text
-        - Adjust min/max length for different summary sizes
-        - Handles documents up to several thousand words
-        - Works with various text domains
-        - Automatic chunking for long texts
+        **How this model works:**
+        
+        This is a **Parameter-Efficient Fine-Tuning (PEFT)** model using **LoRA (Low-Rank Adaptation)**:
+        
+        1. **Base Model**: T5-small (60M parameters)
+        2. **Adapter**: LoRA layers (much smaller, ~1% of parameters)
+        3. **Approach**: Only the adapter layers are fine-tuned, then combined with the base model
+        
+        **Benefits:**
+        - Faster training
+        - Lower memory usage
+        - Easy to share and deploy adapters
+        - Maintains base model capabilities
+        
+        **Files in the model repository:**
+        - `adapter_config.json` - LoRA configuration
+        - `adapter_model.safetensors` - Adapter weights
+        - Tokenizer files
+        - No full model weights (that's why direct loading fails)
         """)
 
 if __name__ == "__main__":
